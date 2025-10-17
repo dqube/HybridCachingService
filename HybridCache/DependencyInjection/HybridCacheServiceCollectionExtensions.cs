@@ -5,6 +5,7 @@ using HybridCache.Serialization;
 using HybridCache.LuaScripting;
 using HybridCache.Clustering;
 using HybridCache.Notifications;
+using HybridCache.CacheWarming;
 using StackExchange.Redis;
 
 namespace HybridCache.DependencyInjection;
@@ -294,6 +295,228 @@ public static class HybridCacheServiceCollectionExtensions
 
         return services;
     }
+
+    /// <summary>
+    /// Adds cache warming services that periodically pre-load data from L2 (distributed) cache
+    /// into L1 (local memory) cache for improved performance.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="configureOptions">An optional action to configure the <see cref="CacheWarmerOptions"/>.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <remarks>
+    /// <para>
+    /// This method requires that both IMemoryCache and IConnectionMultiplexer have been registered.
+    /// The cache warming background service will automatically start when the application starts.
+    /// </para>
+    /// <para>
+    /// Cache warming is useful for:
+    /// - Pre-loading frequently accessed data on application startup
+    /// - Maintaining a warm cache after deployments or restarts
+    /// - Reducing cold-start latency for critical data
+    /// - Keeping hot data fresh in memory on a periodic basis
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// services.AddHybridCacheWithRedis("localhost:6379");
+    /// services.AddCacheWarming(options =>
+    /// {
+    ///     options.EnableAutoWarming = true;
+    ///     options.WarmingInterval = TimeSpan.FromMinutes(5);
+    ///     options.IncludePatterns = new[] { "user:*", "product:*" };
+    ///     options.ExcludePatterns = new[] { "temp:*" };
+    ///     options.MaxKeysPerWarming = 1000;
+    /// });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddCacheWarming(
+        this IServiceCollection services,
+        Action<CacheWarmerOptions>? configureOptions = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        // Configure cache warmer options
+        if (configureOptions != null)
+        {
+            services.Configure(configureOptions);
+        }
+        else
+        {
+            services.Configure<CacheWarmerOptions>(_ => { });
+        }
+
+        // Register cache warmer implementation
+        services.TryAddSingleton<ICacheWarmer, RedisCacheWarmer>();
+
+        // Register background service (automatically starts with the application)
+        services.AddHostedService<CacheWarmerBackgroundService>();
+
+        // Also register as singleton for manual access (statistics, manual triggers, etc.)
+        services.TryAddSingleton<CacheWarmerBackgroundService>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with Redis and all optional capabilities that can be enabled/disabled.
+    /// This is the all-in-one registration method that provides fine-grained control over features.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="redisConfiguration">Redis connection string or configuration.</param>
+    /// <param name="configureCacheOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <param name="configureCapabilities">An action to configure which capabilities to enable.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <example>
+    /// <code>
+    /// services.AddHybridCacheWithCapabilities(
+    ///     "localhost:6379",
+    ///     cacheOptions =>
+    ///     {
+    ///         cacheOptions.KeyPrefix = "myapp:";
+    ///         cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(30);
+    ///     },
+    ///     capabilities =>
+    ///     {
+    ///         capabilities.EnableCacheWarming = true;
+    ///         capabilities.EnableNotifications = true;
+    ///         capabilities.EnableClustering = false;
+    ///         capabilities.CacheWarmingOptions = options =>
+    ///         {
+    ///             options.WarmingInterval = TimeSpan.FromMinutes(5);
+    ///             options.IncludePatterns = new[] { "user:*", "product:*" };
+    ///         };
+    ///         capabilities.NotificationOptions = options =>
+    ///         {
+    ///             options.NotificationChannel = "cache:notifications";
+    ///         };
+    ///     });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddHybridCacheWithCapabilities(
+        this IServiceCollection services,
+        string redisConfiguration,
+        Action<HybridCacheOptions>? configureCacheOptions = null,
+        Action<HybridCacheCapabilities>? configureCapabilities = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (string.IsNullOrEmpty(redisConfiguration))
+        {
+            throw new ArgumentException("Redis configuration cannot be null or empty.", nameof(redisConfiguration));
+        }
+
+        // Build capabilities configuration
+        var capabilities = new HybridCacheCapabilities();
+        configureCapabilities?.Invoke(capabilities);
+
+        // Register Redis connection multiplexer
+        services.AddSingleton<IConnectionMultiplexer>(sp =>
+            ConnectionMultiplexer.Connect(redisConfiguration));
+
+        // Register Redis distributed cache
+        services.AddStackExchangeRedisCache(options =>
+        {
+            options.Configuration = redisConfiguration;
+        });
+
+        // Register Lua script executor based on clustering capability
+        if (capabilities.EnableClustering)
+        {
+            // Configure cluster options
+            var clusterOptions = new RedisClusterOptions { IsClusterMode = true };
+            capabilities.ClusterOptions?.Invoke(clusterOptions);
+
+            services.TryAddSingleton(clusterOptions);
+
+            // Register cluster-aware Lua script executor
+            services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+            {
+                var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+                var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+                var keyPrefix = options?.Value?.KeyPrefix;
+                return new ClusterAwareLuaScriptExecutor(redis, keyPrefix, clusterOptions);
+            });
+        }
+        else
+        {
+            // Register standard Lua script executor
+            services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+            {
+                var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+                var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+                var keyPrefix = options?.Value?.KeyPrefix;
+                return new RedisLuaScriptExecutor(redis, keyPrefix);
+            });
+        }
+
+        // Add hybrid cache with distributed support
+        services.AddHybridCacheWithDistributed(configureCacheOptions);
+
+        // Add cache notifications if enabled
+        if (capabilities.EnableNotifications)
+        {
+            services.AddCacheNotifications(capabilities.NotificationOptions);
+        }
+
+        // Add cache warming if enabled
+        if (capabilities.EnableCacheWarming)
+        {
+            services.AddCacheWarming(capabilities.CacheWarmingOptions);
+        }
+
+        return services;
+    }
+}
+
+/// <summary>
+/// Configuration class for enabling/disabling hybrid cache capabilities.
+/// </summary>
+public class HybridCacheCapabilities
+{
+    /// <summary>
+    /// Gets or sets whether to enable cache warming.
+    /// When enabled, the background service will periodically pre-load data from L2 to L1 cache.
+    /// Default is false.
+    /// </summary>
+    public bool EnableCacheWarming { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets whether to enable cache change notifications.
+    /// When enabled, cache changes will be published via Redis pub/sub for L1 invalidation across instances.
+    /// Default is false.
+    /// </summary>
+    public bool EnableNotifications { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets whether to enable Redis cluster support.
+    /// When enabled, uses cluster-aware Lua script executor with hash slot validation.
+    /// Default is false.
+    /// </summary>
+    public bool EnableClustering { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets the configuration action for cache warming options.
+    /// Only applies if EnableCacheWarming is true.
+    /// </summary>
+    public Action<CacheWarmerOptions>? CacheWarmingOptions { get; set; }
+
+    /// <summary>
+    /// Gets or sets the configuration action for notification options.
+    /// Only applies if EnableNotifications is true.
+    /// </summary>
+    public Action<CacheNotificationOptions>? NotificationOptions { get; set; }
+
+    /// <summary>
+    /// Gets or sets the configuration action for cluster options.
+    /// Only applies if EnableClustering is true.
+    /// </summary>
+    public Action<RedisClusterOptions>? ClusterOptions { get; set; }
 }
 
 
