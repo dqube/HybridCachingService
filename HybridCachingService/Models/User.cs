@@ -9,6 +9,13 @@ public class User
     public DateTime? LastModified { get; set; }
 }
 
+public class UserProfileUpdate
+{
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public int? Age { get; set; }
+}
+
 public class Product
 {
     public int Id { get; set; }

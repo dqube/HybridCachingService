@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using HybridCache.Clustering;
 using HybridCache.LuaScripting;
 using HybridCache.Notifications;
+using HybridCache.Examples;
 using HybridCachingService.Models;
 
 namespace HybridCachingService.Controllers;
@@ -13,12 +14,584 @@ public class AdvancedFeaturesController : ControllerBase
 {
     private readonly HybridCache.IHybridCache _cache;
     private readonly ILogger<AdvancedFeaturesController> _logger;
+    private readonly LuaScriptExamples _luaExamples;
 
-    public AdvancedFeaturesController(HybridCache.IHybridCache cache, ILogger<AdvancedFeaturesController> logger)
+    public AdvancedFeaturesController(
+        HybridCache.IHybridCache cache, 
+        ILogger<AdvancedFeaturesController> logger)
     {
         _cache = cache;
         _logger = logger;
+        _luaExamples = new LuaScriptExamples(cache);
     }
+
+    #region Lua Script Examples
+
+    /// <summary>
+    /// Execute operation with distributed lock
+    /// </summary>
+    [HttpPost("lua/execute-with-lock/{resourceKey}")]
+    public async Task<ActionResult> ExecuteWithLock(string resourceKey, [FromBody] int delayMs = 1000)
+    {
+        try
+        {
+            var result = await _luaExamples.ExecuteWithLockAsync(
+                resourceKey,
+                async () =>
+                {
+                    _logger.LogInformation("Executing protected operation for {Resource}", resourceKey);
+                    await Task.Delay(delayMs);
+                    return $"Operation completed at {DateTime.UtcNow:O}";
+                },
+                TimeSpan.FromSeconds(10)
+            );
+
+            return Ok(new
+            {
+                success = true,
+                resource = resourceKey,
+                result,
+                lockDuration = "10 seconds"
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(409, new { error = ex.Message, resource = resourceKey });
+        }
+    }
+
+    /// <summary>
+    /// Check rate limit for a user
+    /// </summary>
+    [HttpPost("lua/rate-limit/{userId}")]
+    public async Task<ActionResult> CheckRateLimit(
+        string userId,
+        [FromQuery] int maxRequests = 10,
+        [FromQuery] int windowSeconds = 60)
+    {
+        var isAllowed = await _luaExamples.CheckRateLimitAsync(
+            userId,
+            maxRequests,
+            TimeSpan.FromSeconds(windowSeconds)
+        );
+
+        return Ok(new
+        {
+            userId,
+            isAllowed,
+            maxRequests,
+            windowSeconds,
+            message = isAllowed ? "Request allowed" : "Rate limit exceeded"
+        });
+    }
+
+    /// <summary>
+    /// Increment daily counter
+    /// </summary>
+    [HttpPost("lua/counter/{counterKey}/increment")]
+    public async Task<ActionResult> IncrementDailyCounter(string counterKey)
+    {
+        var value = await _luaExamples.IncrementDailyCounterAsync(counterKey);
+
+        return Ok(new
+        {
+            counter = counterKey,
+            value,
+            expiration = "24 hours"
+        });
+    }
+
+    /// <summary>
+    /// Update with optimistic concurrency control
+    /// </summary>
+    [HttpPut("lua/update-with-cas/{key}")]
+    public async Task<ActionResult> UpdateWithCAS(
+        string key,
+        [FromQuery] string expectedValue,
+        [FromQuery] string newValue)
+    {
+        var success = await _luaExamples.UpdateWithConcurrencyCheckAsync(
+            key,
+            expectedValue,
+            newValue,
+            TimeSpan.FromMinutes(10)
+        );
+
+        return Ok(new
+        {
+            success,
+            key,
+            expectedValue,
+            newValue,
+            message = success ? "Value updated successfully" : "Value was modified by another process"
+        });
+    }
+
+    /// <summary>
+    /// Get multiple keys in a single operation
+    /// </summary>
+    [HttpPost("lua/batch-get")]
+    public async Task<ActionResult> BatchGet([FromBody] string[] keys)
+    {
+        var results = await _luaExamples.GetMultipleAsync<string>(keys);
+
+        return Ok(new
+        {
+            totalKeys = keys.Length,
+            foundKeys = results.Count(r => r.Value != null),
+            results
+        });
+    }
+
+    /// <summary>
+    /// Log user activity with size limit
+    /// </summary>
+    [HttpPost("lua/activity/{userId}/log")]
+    public async Task<ActionResult> LogActivity(string userId, [FromBody] string activity)
+    {
+        var count = await _luaExamples.LogActivityAsync(userId, activity, maxActivities: 50);
+
+        return Ok(new
+        {
+            userId,
+            activity,
+            totalActivities = count,
+            maxActivities = 50
+        });
+    }
+
+    /// <summary>
+    /// Get value with sliding expiration
+    /// </summary>
+    [HttpGet("lua/sliding/{key}")]
+    public async Task<ActionResult> GetWithSlidingExpiration(string key)
+    {
+        var value = await _luaExamples.GetWithSlidingExpirationAsync<string>(
+            key,
+            TimeSpan.FromMinutes(5)
+        );
+
+        return Ok(new
+        {
+            key,
+            value,
+            slidingWindow = "5 minutes",
+            message = value != null ? "Value found and expiration extended" : "Value not found"
+        });
+    }
+
+    /// <summary>
+    /// Transfer amount between counters atomically
+    /// </summary>
+    [HttpPost("lua/transfer")]
+    public async Task<ActionResult> TransferBetweenCounters(
+        [FromQuery] string sourceKey,
+        [FromQuery] string targetKey,
+        [FromQuery] long amount)
+    {
+        var success = await _luaExamples.TransferBetweenCountersAsync(sourceKey, targetKey, amount);
+
+        return Ok(new
+        {
+            success,
+            sourceKey,
+            targetKey,
+            amount,
+            message = success ? "Transfer completed" : "Insufficient balance in source"
+        });
+    }
+
+    #endregion
+
+    #region RedisJSON Operations
+
+    /// <summary>
+    /// Set a JSON document in Redis using JSON.SET
+    /// </summary>
+    [HttpPost("json/set/{key}")]
+    public async Task<ActionResult> SetJsonDocument(string key, [FromBody] object jsonDocument)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        // Lua script to set JSON document
+        const string setJsonScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            local value = ARGV[2]
+            
+            -- Use JSON.SET command if RedisJSON module is loaded
+            local ok, result = pcall(redis.call, 'JSON.SET', key, path, value)
+            if ok then
+                return 1
+            else
+                -- Fallback to regular SET if JSON module not available
+                redis.call('SET', key, value)
+                return 0
+            end
+        ";
+
+        var jsonString = System.Text.Json.JsonSerializer.Serialize(jsonDocument);
+        var result = await scriptExecutor.ExecuteAsync<int>(
+            setJsonScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { "$", jsonString }
+        );
+
+        return Ok(new
+        {
+            key,
+            success = true,
+            usedJsonModule = result.Result == 1,
+            message = result.Result == 1 
+                ? "JSON document stored using RedisJSON" 
+                : "JSON document stored as string (RedisJSON module not available)"
+        });
+    }
+
+    /// <summary>
+    /// Get a JSON document from Redis using JSON.GET
+    /// </summary>
+    [HttpGet("json/get/{key}")]
+    public async Task<ActionResult> GetJsonDocument(string key, [FromQuery] string path = "$")
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string getJsonScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            
+            -- Try JSON.GET first
+            local ok, result = pcall(redis.call, 'JSON.GET', key, path)
+            if ok then
+                return result
+            else
+                -- Fallback to regular GET
+                return redis.call('GET', key)
+            end
+        ";
+
+        var result = await scriptExecutor.ExecuteAsync(
+            getJsonScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path }
+        );
+
+        if (!result.Success || result.Result == null)
+        {
+            return NotFound(new { key, message = "JSON document not found" });
+        }
+
+        return Ok(new
+        {
+            key,
+            path,
+            document = result.Result,
+            message = "JSON document retrieved"
+        });
+    }
+
+    /// <summary>
+    /// Set a specific field in JSON document using JSON.SET with path
+    /// </summary>
+    [HttpPatch("json/{key}/field")]
+    public async Task<ActionResult> SetJsonField(
+        string key,
+        [FromQuery] string path,
+        [FromBody] object value)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string setFieldScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            local value = ARGV[2]
+            
+            local ok, result = pcall(redis.call, 'JSON.SET', key, path, value)
+            if ok then
+                return 1
+            else
+                return redis.error_reply(result)
+            end
+        ";
+
+        var valueJson = System.Text.Json.JsonSerializer.Serialize(value);
+        var result = await scriptExecutor.ExecuteAsync<int>(
+            setFieldScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path, valueJson }
+        );
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new
+        {
+            key,
+            path,
+            value,
+            success = result.Result == 1,
+            message = "JSON field updated"
+        });
+    }
+
+    /// <summary>
+    /// Increment a numeric field in JSON document
+    /// </summary>
+    [HttpPost("json/{key}/increment")]
+    public async Task<ActionResult> IncrementJsonField(
+        string key,
+        [FromQuery] string path,
+        [FromQuery] double incrementBy = 1)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string incrementScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            local increment = tonumber(ARGV[2])
+            
+            local ok, result = pcall(redis.call, 'JSON.NUMINCRBY', key, path, increment)
+            if ok then
+                return result
+            else
+                return redis.error_reply(result)
+            end
+        ";
+
+        var result = await scriptExecutor.ExecuteAsync<string>(
+            incrementScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path, incrementBy }
+        );
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new
+        {
+            key,
+            path,
+            incrementBy,
+            newValue = result.Result,
+            message = "JSON field incremented"
+        });
+    }
+
+    /// <summary>
+    /// Append to a JSON array
+    /// </summary>
+    [HttpPost("json/{key}/array/append")]
+    public async Task<ActionResult> AppendToJsonArray(
+        string key,
+        [FromQuery] string path,
+        [FromBody] object value)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string appendScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            local value = ARGV[2]
+            
+            local ok, result = pcall(redis.call, 'JSON.ARRAPPEND', key, path, value)
+            if ok then
+                return result
+            else
+                return redis.error_reply(result)
+            end
+        ";
+
+        var valueJson = System.Text.Json.JsonSerializer.Serialize(value);
+        var result = await scriptExecutor.ExecuteAsync<long>(
+            appendScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path, valueJson }
+        );
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new
+        {
+            key,
+            path,
+            value,
+            arrayLength = result.Result,
+            message = "Value appended to JSON array"
+        });
+    }
+
+    /// <summary>
+    /// Get length of JSON array
+    /// </summary>
+    [HttpGet("json/{key}/array/length")]
+    public async Task<ActionResult> GetJsonArrayLength(string key, [FromQuery] string path = "$")
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string lengthScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            
+            local ok, result = pcall(redis.call, 'JSON.ARRLEN', key, path)
+            if ok then
+                return result
+            else
+                return nil
+            end
+        ";
+
+        var result = await scriptExecutor.ExecuteAsync<long?>(
+            lengthScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path }
+        );
+
+        if (!result.Success || result.Result == null)
+        {
+            return NotFound(new { key, path, message = "Array not found" });
+        }
+
+        return Ok(new
+        {
+            key,
+            path,
+            length = result.Result,
+            message = "JSON array length retrieved"
+        });
+    }
+
+    /// <summary>
+    /// Delete a field from JSON document
+    /// </summary>
+    [HttpDelete("json/{key}/field")]
+    public async Task<ActionResult> DeleteJsonField(string key, [FromQuery] string path)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string deleteScript = @"
+            local key = KEYS[1]
+            local path = ARGV[1]
+            
+            local ok, result = pcall(redis.call, 'JSON.DEL', key, path)
+            if ok then
+                return result
+            else
+                return 0
+            end
+        ";
+
+        var result = await scriptExecutor.ExecuteAsync<int>(
+            deleteScript,
+            keys: new[] { $"json:{key}" },
+            values: new object[] { path }
+        );
+
+        return Ok(new
+        {
+            key,
+            path,
+            deleted = result.Result > 0,
+            fieldsDeleted = result.Result,
+            message = result.Result > 0 ? "Field deleted" : "Field not found"
+        });
+    }
+
+    /// <summary>
+    /// Complex JSON operation: Update user profile with nested fields
+    /// </summary>
+    [HttpPost("json/user/{userId}/update-profile")]
+    public async Task<ActionResult> UpdateUserProfile(int userId, [FromBody] UserProfileUpdate update)
+    {
+        var scriptExecutor = _cache.ScriptExecutor;
+        if (scriptExecutor == null)
+        {
+            return BadRequest(new { message = "Script executor not available" });
+        }
+
+        const string updateProfileScript = @"
+            local key = KEYS[1]
+            local nameValue = ARGV[1]
+            local emailValue = ARGV[2]
+            local ageValue = ARGV[3]
+            
+            -- Update multiple fields atomically
+            redis.call('JSON.SET', key, '$.name', nameValue)
+            redis.call('JSON.SET', key, '$.email', emailValue)
+            
+            if ageValue ~= '' then
+                redis.call('JSON.SET', key, '$.age', ageValue)
+            end
+            
+            -- Update lastModified timestamp
+            local timestamp = redis.call('TIME')[1]
+            redis.call('JSON.SET', key, '$.lastModified', timestamp)
+            
+            -- Increment update counter
+            redis.call('JSON.NUMINCRBY', key, '$.updateCount', 1)
+            
+            return redis.call('JSON.GET', key)
+        ";
+
+        var result = await scriptExecutor.ExecuteAsync<string>(
+            updateProfileScript,
+            keys: new[] { $"json:user:{userId}" },
+            values: new object[] 
+            { 
+                $"\"{update.Name}\"",
+                $"\"{update.Email}\"",
+                update.Age.HasValue ? update.Age.Value.ToString() : ""
+            }
+        );
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new
+        {
+            userId,
+            updatedProfile = result.Result,
+            message = "User profile updated atomically"
+        });
+    }
+
+    #endregion
 
     #region Cluster Operations
 
