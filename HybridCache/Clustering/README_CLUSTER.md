@@ -55,11 +55,24 @@ Only the content within `{ }` is used for hash calculation.
 
 ## Setup
 
-### Option 1: Automatic Cluster Detection
+### Option 1: Using ConfigurationOptions with Action
 
 ```csharp
+using StackExchange.Redis;
+
 services.AddHybridCacheWithRedisCluster(
-    "node1:6379,node2:6379,node3:6379",
+    redisConfig =>
+    {
+        redisConfig.EndPoints.Add("node1:6379");
+        redisConfig.EndPoints.Add("node2:6379");
+        redisConfig.EndPoints.Add("node3:6379");
+        redisConfig.Password = "mypassword";
+        redisConfig.Ssl = true;
+        redisConfig.ConnectRetry = 5;
+        redisConfig.ConnectTimeout = 10000;
+        redisConfig.AbortOnConnectFail = false;
+        redisConfig.ReconnectRetryPolicy = new ExponentialRetry(5000);
+    },
     cacheOptions =>
     {
         cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(10);
@@ -74,7 +87,39 @@ services.AddHybridCacheWithRedisCluster(
 );
 ```
 
-### Option 2: Manual Configuration
+### Option 2: Using ConfigurationOptions Object
+
+```csharp
+using StackExchange.Redis;
+
+var redisConfig = new ConfigurationOptions
+{
+    EndPoints = { "node1:6379", "node2:6379", "node3:6379" },
+    Password = "mypassword",
+    Ssl = true,
+    ConnectRetry = 5,
+    ConnectTimeout = 10000,
+    AbortOnConnectFail = false,
+    ReconnectRetryPolicy = new ExponentialRetry(5000)
+};
+
+services.AddHybridCacheWithRedisCluster(
+    redisConfig,
+    cacheOptions =>
+    {
+        cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(10);
+        cacheOptions.KeyPrefix = "myapp";
+    },
+    clusterOptions =>
+    {
+        clusterOptions.IsClusterMode = true;
+        clusterOptions.ValidateHashSlots = true;
+        clusterOptions.UseHashTags = true;
+    }
+);
+```
+
+### Option 3: Manual Configuration
 
 ```csharp
 var configOptions = ConfigurationOptions.Parse("node1:6379,node2:6379,node3:6379");

@@ -193,7 +193,10 @@ public static class CacheWarmingUsageExample
     {
         // 1. Register hybrid cache with Redis cluster support
         services.AddHybridCacheWithRedisCluster(
-            redisConnectionString,
+            redisConfig =>
+            {
+                redisConfig.EndPoints.Add(redisConnectionString);
+            },
             cacheOptions =>
             {
                 cacheOptions.KeyPrefix = "myapp:";

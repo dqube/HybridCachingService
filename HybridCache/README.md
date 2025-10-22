@@ -76,7 +76,7 @@ services.AddHybridCacheWithDistributed(options =>
 });
 ```
 
-**With Redis and Lua script support:**
+**With Redis and Lua script support (simple connection string):**
 
 ```csharp
 // All-in-one setup with Redis and Lua support
@@ -87,12 +87,61 @@ services.AddHybridCacheWithRedis("localhost:6379", options =>
 });
 ```
 
+**With Redis and advanced configuration (ConfigurationOptions):**
+
+```csharp
+using StackExchange.Redis;
+
+// Option 1: Using Action<ConfigurationOptions>
+services.AddHybridCacheWithRedis(redisConfig =>
+{
+    redisConfig.EndPoints.Add("localhost:6379");
+    redisConfig.Password = "mypassword";
+    redisConfig.Ssl = true;
+    redisConfig.ConnectRetry = 3;
+    redisConfig.ConnectTimeout = 5000;
+    redisConfig.AbortOnConnectFail = false;
+    redisConfig.ReconnectRetryPolicy = new ExponentialRetry(5000);
+}, cacheOptions =>
+{
+    cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(10);
+    cacheOptions.KeyPrefix = "myapp";
+});
+
+// Option 2: Using ConfigurationOptions object
+var redisConfig = new ConfigurationOptions
+{
+    EndPoints = { "localhost:6379", "localhost:6380" },
+    Password = "mypassword",
+    Ssl = true,
+    ConnectRetry = 3,
+    ConnectTimeout = 5000,
+    AbortOnConnectFail = false,
+    ReconnectRetryPolicy = new ExponentialRetry(5000)
+};
+
+services.AddHybridCacheWithRedis(redisConfig, options =>
+{
+    options.DefaultExpiration = TimeSpan.FromMinutes(10);
+    options.KeyPrefix = "myapp";
+});
+```
+
 **With Redis Cluster (partitioning/sharding):**
 
 ```csharp
-// Redis Cluster setup with automatic hash slot validation
+// Redis Cluster setup with ConfigurationOptions
 services.AddHybridCacheWithRedisCluster(
-    "node1:6379,node2:6379,node3:6379",
+    redisConfig =>
+    {
+        redisConfig.EndPoints.Add("node1:6379");
+        redisConfig.EndPoints.Add("node2:6379");
+        redisConfig.EndPoints.Add("node3:6379");
+        redisConfig.Password = "mypassword";
+        redisConfig.Ssl = true;
+        redisConfig.ConnectRetry = 5;
+        redisConfig.AbortOnConnectFail = false;
+    },
     cacheOptions =>
     {
         cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(10);
@@ -100,6 +149,7 @@ services.AddHybridCacheWithRedisCluster(
     },
     clusterOptions =>
     {
+        clusterOptions.IsClusterMode = true;
         clusterOptions.ValidateHashSlots = true;  // Validate multi-key ops
         clusterOptions.UseHashTags = true;        // Auto-wrap with hash tags
     }
@@ -121,6 +171,43 @@ services.AddCacheNotifications(options =>
     options.EnableNotifications = true;
     options.AutoInvalidateL1OnNotification = true;
 });
+```
+
+**With all capabilities (ConfigurationOptions):**
+
+```csharp
+// All-in-one with fine-grained control
+services.AddHybridCacheWithCapabilities(
+    redisConfig =>
+    {
+        redisConfig.EndPoints.Add("localhost:6379");
+        redisConfig.Password = "mypassword";
+        redisConfig.Ssl = true;
+        redisConfig.ConnectRetry = 3;
+        redisConfig.AbortOnConnectFail = false;
+    },
+    cacheOptions =>
+    {
+        cacheOptions.KeyPrefix = "myapp:";
+        cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(30);
+    },
+    capabilities =>
+    {
+        capabilities.EnableCacheWarming = true;
+        capabilities.EnableNotifications = true;
+        capabilities.EnableClustering = false;
+        
+        capabilities.CacheWarmingOptions = warmOpts =>
+        {
+            warmOpts.WarmingInterval = TimeSpan.FromMinutes(5);
+            warmOpts.IncludePatterns = new[] { "user:*", "product:*" };
+        };
+        
+        capabilities.NotificationOptions = notifyOpts =>
+        {
+            notifyOpts.NotificationChannel = "cache:notifications";
+        };
+    });
 ```
 
 ### 2. Use in Your Code

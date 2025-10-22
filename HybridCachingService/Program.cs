@@ -12,25 +12,59 @@ namespace HybridCachingService
             builder.Services.AddControllers();
             builder.Services.AddAuthorization();
 
-            // Configure HybridCache with Redis, Lua scripts, Cluster support, and Notifications
+            // Configure HybridCache with all capabilities in one unified call
             var redisConnection = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
 
-            builder.Services.AddHybridCacheWithRedis(redisConnection, options =>
-            {
-                options.DefaultExpiration = TimeSpan.FromMinutes(10);
-                options.DefaultLocalExpiration = TimeSpan.FromMinutes(2);
-                options.KeyPrefix = "hybridcache";
-            });
+            builder.Services.AddHybridCacheWithCapabilities(
+                redisConnection,
+                cacheOptions =>
+                {
+                    cacheOptions.KeyPrefix = "hybridcache";
+                    cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(10);
+                    cacheOptions.DefaultLocalExpiration = TimeSpan.FromMinutes(2);
+                },
+                capabilities =>
+                {
+                    // Enable cache notifications for multi-instance synchronization
+                    capabilities.EnableNotifications = true;
+                    
+                    // Optionally enable cache warming (currently disabled)
+                    capabilities.EnableCacheWarming = false;
+                    
+                    // Optionally enable clustering (currently disabled)
+                    capabilities.EnableClustering = false;
 
-            // Add cache notifications for multi-instance synchronization
-            builder.Services.AddCacheNotifications(options =>
-            {
-                options.EnableNotifications = true;
-                options.AutoInvalidateL1OnNotification = true;
-                options.NotificationChannel = "hybridcache:notifications";
-                options.IgnoreSelfNotifications = true;
-                options.IncludeKeyPatterns = new[] { "user:*", "product:*", "session:*" };
-            });
+                    // Configure notifications
+                    capabilities.NotificationOptions = options =>
+                    {
+                        options.EnableNotifications = true;
+                        options.AutoInvalidateL1OnNotification = true;
+                        options.NotificationChannel = "hybridcache:notifications";
+                        options.IgnoreSelfNotifications = true;
+                        options.IncludeKeyPatterns = new[] { "user:*", "product:*", "session:*" };
+                    };
+
+                    // Uncomment to enable cache warming
+                    /*
+                    capabilities.CacheWarmingOptions = options =>
+                    {
+                        options.EnableAutoWarming = true;
+                        options.WarmingInterval = TimeSpan.FromMinutes(5);
+                        options.IncludePatterns = new[] { "user:*", "product:*" };
+                        options.MaxKeysPerWarming = 1000;
+                    };
+                    */
+
+                    // Uncomment to enable clustering
+                    /*
+                    capabilities.ClusterOptions = options =>
+                    {
+                        options.IsClusterMode = true;
+                        options.UseHashTags = true;
+                        options.ValidateHashSlots = true;
+                    };
+                    */
+                });
 
             // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
             builder.Services.AddEndpointsApiExplorer();

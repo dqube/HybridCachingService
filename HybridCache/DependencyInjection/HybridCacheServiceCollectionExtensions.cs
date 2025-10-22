@@ -166,16 +166,30 @@ public static class HybridCacheServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Adds hybrid cache with existing Redis connection and Lua script support.
+    /// Adds hybrid cache with Redis and Lua script support using ConfigurationOptions.
     /// </summary>
     /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="redisConfigurationOptions">Redis ConfigurationOptions with detailed settings like endpoints, password, SSL, retry policies, etc.</param>
     /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
     /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
-    /// <remarks>
-    /// This method requires that an IConnectionMultiplexer has been registered before calling this method.
-    /// </remarks>
-    public static IServiceCollection AddHybridCacheWithRedisLuaSupport(
+    /// <example>
+    /// <code>
+    /// var redisConfig = new ConfigurationOptions
+    /// {
+    ///     EndPoints = { "localhost:6379", "localhost:6380" },
+    ///     Password = "mypassword",
+    ///     Ssl = true,
+    ///     ConnectRetry = 3,
+    ///     ConnectTimeout = 5000,
+    ///     AbortOnConnectFail = false,
+    ///     ReconnectRetryPolicy = new ExponentialRetry(5000)
+    /// };
+    /// services.AddHybridCacheWithRedis(redisConfig);
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddHybridCacheWithRedis(
         this IServiceCollection services,
+        ConfigurationOptions redisConfigurationOptions,
         Action<HybridCacheOptions>? configureOptions = null)
     {
         if (services == null)
@@ -183,7 +197,22 @@ public static class HybridCacheServiceCollectionExtensions
             throw new ArgumentNullException(nameof(services));
         }
 
-        // Register Lua script executor (requires IConnectionMultiplexer to be already registered)
+        if (redisConfigurationOptions == null)
+        {
+            throw new ArgumentNullException(nameof(redisConfigurationOptions));
+        }
+
+        // Register Redis connection multiplexer
+        services.AddSingleton<IConnectionMultiplexer>(sp =>
+            ConnectionMultiplexer.Connect(redisConfigurationOptions));
+
+        // Register Redis distributed cache
+        services.AddStackExchangeRedisCache(options =>
+        {
+            options.ConfigurationOptions = redisConfigurationOptions;
+        });
+
+        // Register Lua script executor
         services.TryAddSingleton<ILuaScriptExecutor>(sp =>
         {
             var redis = sp.GetRequiredService<IConnectionMultiplexer>();
@@ -199,16 +228,73 @@ public static class HybridCacheServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Adds hybrid cache with Redis cluster support and Lua scripts.
+    /// Adds hybrid cache with Redis and Lua script support using a configuration action.
     /// </summary>
     /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
-    /// <param name="redisConfiguration">Redis cluster connection string.</param>
+    /// <param name="configureRedisOptions">An action to configure the Redis <see cref="ConfigurationOptions"/>.</param>
+    /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <example>
+    /// <code>
+    /// services.AddHybridCacheWithRedis(redisConfig =>
+    /// {
+    ///     redisConfig.EndPoints.Add("localhost:6379");
+    ///     redisConfig.Password = "mypassword";
+    ///     redisConfig.Ssl = true;
+    ///     redisConfig.ConnectRetry = 3;
+    ///     redisConfig.ConnectTimeout = 5000;
+    ///     redisConfig.AbortOnConnectFail = false;
+    ///     redisConfig.ReconnectRetryPolicy = new ExponentialRetry(5000);
+    /// });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddHybridCacheWithRedis(
+        this IServiceCollection services,
+        Action<ConfigurationOptions> configureRedisOptions,
+        Action<HybridCacheOptions>? configureOptions = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (configureRedisOptions == null)
+        {
+            throw new ArgumentNullException(nameof(configureRedisOptions));
+        }
+
+        var redisConfigurationOptions = new ConfigurationOptions();
+        configureRedisOptions(redisConfigurationOptions);
+
+        return services.AddHybridCacheWithRedis(redisConfigurationOptions, configureOptions);
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with Redis cluster support and Lua scripts using ConfigurationOptions.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="redisConfigurationOptions">Redis ConfigurationOptions with detailed settings like endpoints, password, SSL, retry policies, etc.</param>
     /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
     /// <param name="configureClusterOptions">An optional action to configure the <see cref="RedisClusterOptions"/>.</param>
     /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <example>
+    /// <code>
+    /// var redisConfig = new ConfigurationOptions
+    /// {
+    ///     EndPoints = { "node1:6379", "node2:6379", "node3:6379" },
+    ///     Password = "mypassword",
+    ///     Ssl = true,
+    ///     ConnectRetry = 5,
+    ///     ConnectTimeout = 10000,
+    ///     AbortOnConnectFail = false,
+    ///     ReconnectRetryPolicy = new ExponentialRetry(5000)
+    /// };
+    /// services.AddHybridCacheWithRedisCluster(redisConfig);
+    /// </code>
+    /// </example>
     public static IServiceCollection AddHybridCacheWithRedisCluster(
         this IServiceCollection services,
-        string redisConfiguration,
+        ConfigurationOptions redisConfigurationOptions,
         Action<HybridCacheOptions>? configureOptions = null,
         Action<RedisClusterOptions>? configureClusterOptions = null)
     {
@@ -217,9 +303,9 @@ public static class HybridCacheServiceCollectionExtensions
             throw new ArgumentNullException(nameof(services));
         }
 
-        if (string.IsNullOrEmpty(redisConfiguration))
+        if (redisConfigurationOptions == null)
         {
-            throw new ArgumentException("Redis configuration cannot be null or empty.", nameof(redisConfiguration));
+            throw new ArgumentNullException(nameof(redisConfigurationOptions));
         }
 
         // Configure cluster options
@@ -228,12 +314,12 @@ public static class HybridCacheServiceCollectionExtensions
 
         // Register Redis connection multiplexer
         services.AddSingleton<IConnectionMultiplexer>(sp =>
-            ConnectionMultiplexer.Connect(redisConfiguration));
+            ConnectionMultiplexer.Connect(redisConfigurationOptions));
 
         // Register Redis distributed cache
         services.AddStackExchangeRedisCache(options =>
         {
-            options.Configuration = redisConfiguration;
+            options.ConfigurationOptions = redisConfigurationOptions;
         });
 
         // Register cluster options
@@ -252,6 +338,157 @@ public static class HybridCacheServiceCollectionExtensions
         services.AddHybridCacheWithDistributed(configureOptions);
 
         return services;
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with Redis cluster support and Lua scripts using a configuration action.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="configureRedisOptions">An action to configure the Redis <see cref="ConfigurationOptions"/>.</param>
+    /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <param name="configureClusterOptions">An optional action to configure the <see cref="RedisClusterOptions"/>.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <example>
+    /// <code>
+    /// services.AddHybridCacheWithRedisCluster(
+    ///     redisConfig =>
+    ///     {
+    ///         redisConfig.EndPoints.Add("node1:6379");
+    ///         redisConfig.EndPoints.Add("node2:6379");
+    ///         redisConfig.EndPoints.Add("node3:6379");
+    ///         redisConfig.Password = "mypassword";
+    ///         redisConfig.Ssl = true;
+    ///         redisConfig.ConnectRetry = 5;
+    ///         redisConfig.AbortOnConnectFail = false;
+    ///     });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddHybridCacheWithRedisCluster(
+        this IServiceCollection services,
+        Action<ConfigurationOptions> configureRedisOptions,
+        Action<HybridCacheOptions>? configureOptions = null,
+        Action<RedisClusterOptions>? configureClusterOptions = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (configureRedisOptions == null)
+        {
+            throw new ArgumentNullException(nameof(configureRedisOptions));
+        }
+
+        var redisConfigurationOptions = new ConfigurationOptions();
+        configureRedisOptions(redisConfigurationOptions);
+
+        return services.AddHybridCacheWithRedisCluster(redisConfigurationOptions, configureOptions, configureClusterOptions);
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with Redis and all optional capabilities using ConfigurationOptions.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="redisConfigurationOptions">Redis ConfigurationOptions with detailed settings.</param>
+    /// <param name="configureCacheOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <param name="configureCapabilities">An action to configure which capabilities to enable.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    public static IServiceCollection AddHybridCacheWithCapabilities(
+        this IServiceCollection services,
+        ConfigurationOptions redisConfigurationOptions,
+        Action<HybridCacheOptions>? configureCacheOptions = null,
+        Action<HybridCacheCapabilities>? configureCapabilities = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (redisConfigurationOptions == null)
+        {
+            throw new ArgumentNullException(nameof(redisConfigurationOptions));
+        }
+
+        var capabilities = new HybridCacheCapabilities();
+        configureCapabilities?.Invoke(capabilities);
+
+        services.AddSingleton<IConnectionMultiplexer>(sp =>
+            ConnectionMultiplexer.Connect(redisConfigurationOptions));
+
+        services.AddStackExchangeRedisCache(options =>
+        {
+            options.ConfigurationOptions = redisConfigurationOptions;
+        });
+
+        if (capabilities.EnableClustering)
+        {
+            var clusterOptions = new RedisClusterOptions { IsClusterMode = true };
+            capabilities.ClusterOptions?.Invoke(clusterOptions);
+
+            services.TryAddSingleton(clusterOptions);
+
+            services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+            {
+                var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+                var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+                var keyPrefix = options?.Value?.KeyPrefix;
+                return new ClusterAwareLuaScriptExecutor(redis, keyPrefix, clusterOptions);
+            });
+        }
+        else
+        {
+            services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+            {
+                var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+                var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+                var keyPrefix = options?.Value?.KeyPrefix;
+                return new RedisLuaScriptExecutor(redis, keyPrefix);
+            });
+        }
+
+        services.AddHybridCacheWithDistributed(configureCacheOptions);
+
+        if (capabilities.EnableNotifications)
+        {
+            services.AddCacheNotifications(capabilities.NotificationOptions);
+        }
+
+        if (capabilities.EnableCacheWarming)
+        {
+            services.AddCacheWarming(capabilities.CacheWarmingOptions);
+        }
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with Redis and all optional capabilities using a configuration action.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="configureRedisOptions">An action to configure the Redis <see cref="ConfigurationOptions"/>.</param>
+    /// <param name="configureCacheOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <param name="configureCapabilities">An action to configure which capabilities to enable.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    public static IServiceCollection AddHybridCacheWithCapabilities(
+        this IServiceCollection services,
+        Action<ConfigurationOptions> configureRedisOptions,
+        Action<HybridCacheOptions>? configureCacheOptions = null,
+        Action<HybridCacheCapabilities>? configureCapabilities = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (configureRedisOptions == null)
+        {
+            throw new ArgumentNullException(nameof(configureRedisOptions));
+        }
+
+        var redisConfigurationOptions = new ConfigurationOptions();
+        configureRedisOptions(redisConfigurationOptions);
+
+        return services.AddHybridCacheWithCapabilities(redisConfigurationOptions, configureCacheOptions, configureCapabilities);
     }
 
     /// <summary>
@@ -469,6 +706,90 @@ public static class HybridCacheServiceCollectionExtensions
         {
             services.AddCacheWarming(capabilities.CacheWarmingOptions);
         }
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with existing Redis connection and Lua script support.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="connectionMultiplexer">The existing <see cref="IConnectionMultiplexer"/> instance.</param>
+    /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <remarks>
+    /// This method is useful when you already have a Redis connection configured
+    /// and want to use it for hybrid caching without re-creating the connection.
+    /// </remarks>
+    public static IServiceCollection AddHybridCacheWithRedis(
+        this IServiceCollection services,
+        IConnectionMultiplexer connectionMultiplexer,
+        Action<HybridCacheOptions>? configureOptions = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        if (connectionMultiplexer == null)
+        {
+            throw new ArgumentNullException(nameof(connectionMultiplexer));
+        }
+
+        // Register existing Redis connection multiplexer
+        services.AddSingleton<IConnectionMultiplexer>(connectionMultiplexer);
+
+        // Register Redis distributed cache
+        services.AddStackExchangeRedisCache(options =>
+        {
+            options.Configuration = connectionMultiplexer.Configuration;
+        });
+
+        // Register Lua script executor
+        services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+        {
+            var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+            var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+            var keyPrefix = options?.Value?.KeyPrefix;
+            return new RedisLuaScriptExecutor(redis, keyPrefix);
+        });
+
+        // Add hybrid cache with distributed support
+        services.AddHybridCacheWithDistributed(configureOptions);
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds hybrid cache with existing Redis connection and Lua script support.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection" /> to add services to.</param>
+    /// <param name="configureOptions">An optional action to configure the <see cref="HybridCacheOptions"/>.</param>
+    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
+    /// <remarks>
+    /// This method requires that an IConnectionMultiplexer has been registered before calling this method.
+    /// </remarks>
+    [Obsolete("Use AddHybridCacheWithRedis(IConnectionMultiplexer, Action<HybridCacheOptions>?) instead.")]
+    public static IServiceCollection AddHybridCacheWithRedisLuaSupport(
+        this IServiceCollection services,
+        Action<HybridCacheOptions>? configureOptions = null)
+    {
+        if (services == null)
+        {
+            throw new ArgumentNullException(nameof(services));
+        }
+
+        // Register Lua script executor (requires IConnectionMultiplexer to be already registered)
+        services.TryAddSingleton<ILuaScriptExecutor>(sp =>
+        {
+            var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+            var options = sp.GetService<Microsoft.Extensions.Options.IOptions<HybridCacheOptions>>();
+            var keyPrefix = options?.Value?.KeyPrefix;
+            return new RedisLuaScriptExecutor(redis, keyPrefix);
+        });
+
+        // Add hybrid cache with distributed support
+        services.AddHybridCacheWithDistributed(configureOptions);
 
         return services;
     }
