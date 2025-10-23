@@ -8,6 +8,7 @@ Cache warming is a performance optimization technique that pre-loads frequently 
 
 - [Why Cache Warming?](#why-cache-warming)
 - [How It Works](#how-it-works)
+- [Understanding MaxKeysPerWarming with Large Datasets](#understanding-maxkeysperwarming-with-large-datasets)
 - [Getting Started](#getting-started)
 - [Configuration Options](#configuration-options)
 - [Usage Examples](#usage-examples)
@@ -104,6 +105,328 @@ Cache warming proactively loads frequently accessed keys from Redis into local m
 
 ---
 
+## Understanding MaxKeysPerWarming with Large Datasets
+
+### ⚠️ Important: MaxKeysPerWarming is a LIMIT, Not a Batch Size
+
+When you have a large dataset (e.g., 30,000 records) and set `MaxKeysPerWarming = 1000`, it's crucial to understand how cache warming behaves:
+
+### How It Actually Works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Step 1: SCAN Phase (Discovers ALL Keys)                │
+│  ✓ Scans through ALL 30,000 keys in Redis              │
+│  ✓ Updates KeysScanned counter                         │
+│  ✓ Uses Redis SCAN cursor (non-blocking)               │
+│  Result: KeysScanned = 30,000                           │
+└─────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 2: LOADING Phase (Applies Limit)                  │
+│  ✓ Loads FIRST 1,000 keys into L1 cache                │
+│  ✓ Updates KeysLoaded counter                          │
+│  ✗ STOPS after reaching MaxKeysPerWarming              │
+│  Result: KeysLoaded = 1,000                             │
+│          KeysSkipped = 29,000                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Example Scenario: 30,000 Records in Redis
+
+**Configuration:**
+```csharp
+options.MaxKeysPerWarming = 1000;
+options.WarmingInterval = TimeSpan.FromMinutes(5);
+```
+
+**What Happens Each Cycle:**
+
+| Cycle | Time | KeysScanned | KeysLoaded | KeysSkipped | Memory Used |
+|-------|------|-------------|------------|-------------|-------------|
+| 1 | 10:00 AM | 30,000 | 1,000 | 29,000 | ~10-13 MB |
+| 2 | 10:05 AM | 30,000 | 1,000 | 29,000 | ~10-13 MB |
+| 3 | 10:10 AM | 30,000 | 1,000 | 29,000 | ~10-13 MB |
+
+**Log Output:**
+```
+[Information] Cache warming completed successfully. 
+              Loaded: 1,000, Skipped: 29,000, Scanned: 30,000, Duration: 2340ms
+```
+
+### ❓ Will All 30K Keys Get Warmed Eventually?
+
+**NO** - With the default behavior:
+- ✅ All 30K keys are **scanned** every cycle
+- ❌ Only the **first 1,000 keys** found are loaded
+- ❌ The remaining 29,000 keys are **skipped** every cycle
+- ⚠️ The order depends on Redis internal structure (not guaranteed to rotate)
+
+### 💡 Solutions for Large Datasets
+
+#### Option 1: Increase MaxKeysPerWarming ⭐ Recommended
+
+```csharp
+services.AddCacheWarming(options =>
+{
+    // Load all 30K keys
+    options.MaxKeysPerWarming = 30000;
+    options.BatchSize = 200;
+    options.WarmingInterval = TimeSpan.FromMinutes(10);
+});
+```
+
+**Memory Calculation:**
+```
+30,000 keys × 10 KB average = 300 MB
+Add 30% overhead = 390 MB total memory required
+```
+
+**Pros:**
+- ✅ All keys loaded into L1 cache
+- ✅ Maximum performance for cache hits
+
+**Cons:**
+- ⚠️ High memory usage
+- ⚠️ Longer warming time (10-30 seconds)
+- ⚠️ Risk of OOM if server has limited memory
+
+#### Option 2: Use Selective Patterns 🎯 Best Practice
+
+```csharp
+services.AddCacheWarming(options =>
+{
+    options.MaxKeysPerWarming = 5000;
+    
+    // Only warm frequently accessed data
+    options.IncludePatterns = new[]
+    {
+        "user:active:*",      // Active users only (not all 30K)
+        "product:popular:*",  // Top products (not entire catalog)
+        "config:*",           // Critical configuration
+        "category:*"          // Category data
+    };
+    
+    // Exclude rarely accessed data
+    options.ExcludePatterns = new[]
+    {
+        "user:inactive:*",
+        "product:archived:*",
+        "temp:*"
+    };
+    
+    options.ContinueOnError = true;
+    options.EnableDetailedLogging = false;
+});
+```
+
+**Memory Calculation:**
+```
+5,000 keys × 10 KB average = 50 MB
+Add 30% overhead = 65 MB total memory required
+```
+
+**Pros:**
+- ✅ Moderate memory usage
+- ✅ Faster warming (1-5 seconds)
+- ✅ Focus on high-value data
+
+**Cons:**
+- ⚠️ Some data still requires L2 fetch on first access
+
+#### Option 3: Staged Warming Over Multiple Cycles
+
+```csharp
+services.AddCacheWarming(options =>
+{
+    // Warm 10K keys per cycle
+    options.MaxKeysPerWarming = 10000;
+    options.WarmingInterval = TimeSpan.FromMinutes(15);
+    
+    // Over time, different subsets may be warmed
+    // Note: Redis SCAN doesn't guarantee order, so this isn't truly staged
+});
+```
+
+**Pros:**
+- ✅ Spreads memory load over time
+- ✅ Lower memory peak
+
+**Cons:**
+- ⚠️ Takes longer to warm all data
+- ⚠️ No guarantee which 10K keys are warmed
+- ⚠️ Not deterministic
+
+#### Option 4: Prioritized Warming Strategy 🏆 Advanced
+
+```csharp
+// Priority 1: Critical data (immediate)
+services.AddCacheWarming(options =>
+{
+    options.MaxKeysPerWarming = 1000;
+    options.WarmingInterval = TimeSpan.FromMinutes(2);
+    options.IncludePatterns = new[] { "config:*", "feature:flags:*" };
+});
+
+// Priority 2: Let natural access patterns warm the rest
+// Use GetOrCreateAsync for lazy loading
+public async Task<T> GetCachedDataAsync<T>(string key, Func<Task<T>> factory)
+{
+    return await _cache.GetOrCreateAsync(key, factory);
+}
+```
+
+**Pros:**
+- ✅ Critical data always warm
+- ✅ Memory efficient
+- ✅ Natural access patterns optimize cache
+
+**Cons:**
+- ⚠️ First access to non-critical data still hits L2
+
+#### Option 5: Multi-Pattern Strategy 📊 Enterprise
+
+```csharp
+services.AddCacheWarming(options =>
+{
+    options.MaxKeysPerWarming = 15000;
+    options.BatchSize = 200;
+    options.WarmingInterval = TimeSpan.FromMinutes(5);
+    
+    // Segment by business priority
+    options.IncludePatterns = new[]
+    {
+        // Tier 1: Always accessed (2K keys)
+        "config:*",
+        "feature:*",
+        
+        // Tier 2: Frequently accessed (8K keys)
+        "user:active:*",
+        "product:bestseller:*",
+        "category:*",
+        
+        // Tier 3: Moderately accessed (5K keys)
+        "product:new:*",
+        "user:premium:*"
+    };
+    
+    // Exclude low-value data
+    options.ExcludePatterns = new[]
+    {
+        "user:inactive:*",
+        "product:discontinued:*",
+        "session:*",
+        "temp:*",
+        "lock:*"
+    };
+});
+```
+
+**Memory Calculation:**
+```
+15,000 keys × 10 KB average = 150 MB
+Add 30% overhead = 195 MB total memory required
+```
+
+### 📊 Performance Impact by Dataset Size
+
+| Records | MaxKeysPerWarming | Memory | Warming Time | Recommendation |
+|---------|------------------|---------|--------------|----------------|
+| 1K | 1,000 | ~13 MB | < 1 sec | ✅ Load all |
+| 5K | 5,000 | ~65 MB | 1-3 sec | ✅ Load all |
+| 10K | 10,000 | ~130 MB | 3-6 sec | ✅ Load all (if memory allows) |
+| 30K | 30,000 | ~390 MB | 10-30 sec | ⚠️ Consider selective patterns |
+| 30K | 10,000 | ~130 MB | 3-6 sec | ✅ Use selective patterns |
+| 100K | 50,000 | ~650 MB | 30-60 sec | ⚠️ Definitely use selective patterns |
+
+### 🎯 Recommended Configuration for 30K Records
+
+```csharp
+services.AddHybridCacheWithCapabilities(
+    redisConnection,
+    cacheOptions =>
+    {
+        cacheOptions.KeyPrefix = "myapp:";
+        cacheOptions.DefaultExpiration = TimeSpan.FromMinutes(30);
+        cacheOptions.DefaultLocalExpiration = TimeSpan.FromMinutes(5);
+    },
+    capabilities =>
+    {
+        capabilities.EnableCacheWarming = true;
+        
+        capabilities.CacheWarmingOptions = options =>
+        {
+            // Analyze your actual usage patterns:
+            // - If 80% of traffic hits 20% of keys → Warm only those
+            // - If memory is abundant (4GB+) → Consider warming all
+            // - If memory is limited (< 2GB) → Be very selective
+            
+            options.MaxKeysPerWarming = 10000;  // Warm 1/3 of data
+            options.WarmingInterval = TimeSpan.FromMinutes(5);
+            options.BatchSize = 200;
+            options.FetchTimeout = TimeSpan.FromSeconds(10);
+            
+            // BE SELECTIVE - Only warm what you need
+            options.IncludePatterns = new[] 
+            { 
+                "config:*",           // ~100 keys
+                "user:active:*",      // ~5,000 active users
+                "product:featured:*", // ~500 featured products
+                "category:*"          // ~100 categories
+                // Total: ~5,700 keys instead of 30,000
+            };
+            
+            options.ExcludePatterns = new[]
+            {
+                "user:inactive:*",
+                "temp:*",
+                "session:*"
+            };
+            
+            options.ContinueOnError = true;
+            options.EnableDetailedLogging = false;
+        };
+    });
+```
+
+### 🔍 Monitoring Your Configuration
+
+```csharp
+// Add endpoint to check warming effectiveness
+[HttpGet("cache/warming/analysis")]
+public IActionResult GetWarmingAnalysis()
+{
+    var stats = _warmerService.GetStatistics();
+    var coverage = stats.lastResult.keysLoaded / (double)stats.lastResult.keysScanned * 100;
+    
+    return Ok(new
+    {
+        totalKeysInRedis = stats.lastResult.keysScanned,
+        keysWarmed = stats.lastResult.keysLoaded,
+        keysNotWarmed = stats.lastResult.keysSkipped,
+        coveragePercentage = $"{coverage:F2}",
+        memoryEstimate = $"{(stats.lastResult.keysLoaded * 10 / 1024.0):F2} MB",
+        recommendation = coverage < 30 
+            ? "Consider increasing MaxKeysPerWarming or using better patterns"
+            : coverage > 90
+                ? "Good coverage - monitor memory usage"
+                : "Balanced approach"
+    });
+}
+```
+
+### ⚡ Key Takeaways
+
+1. **`MaxKeysPerWarming` is a HARD LIMIT** - Only that many keys are loaded per cycle
+2. **ALL keys are SCANNED** - But not all are loaded
+3. **Memory is the PRIMARY constraint** - Calculate before configuring
+4. **Use patterns wisely** - Only warm frequently accessed data
+5. **Monitor and adjust** - Track KeysScanned vs KeysLoaded ratios
+6. **Consider lazy loading** - Let `GetOrCreateAsync` warm on demand for less critical data
+
+---
+
 ## Getting Started
 
 ### 1. Install the Package
@@ -148,7 +471,7 @@ Check logs on application startup:
 ```
 [Information] Cache warming background service started. Initial delay: 00:00:30, Interval: 00:05:00
 [Information] Starting cache warming cycle at 2024-01-15 10:30:00
-[Information] Cache warming completed successfully. Loaded: 523, Skipped: 12, Scanned: 535, Duration: 1234ms
+[Information] Cache warming completed successfully. Loaded: 523, Scanned: 535, Duration: 1234ms
 ```
 
 ---
